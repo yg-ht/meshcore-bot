@@ -273,9 +273,13 @@
                     </div>
                     <div class="col-md-2">
                         <label for="filter-path-max-hops" class="form-label">Max Hops</label>
-                        <input type="number" class="form-control" id="filter-path-max-hops" min="1" max="8" value="5" onchange="normalisePathMaxHops();">
+                        <input type="number" class="form-control" id="filter-path-max-hops" min="1" value="5" onchange="normalisePathMaxHops();">
                     </div>
-                    <div class="col-md-4">
+                    <div class="col-md-2">
+                        <label for="filter-path-max-results" class="form-label">Max Paths</label>
+                        <input type="number" class="form-control" id="filter-path-max-results" min="1" value="100" onchange="normalisePathMaxResults();">
+                    </div>
+                    <div class="col-md-2">
                         <label class="form-label">&nbsp;</label>
                         <div class="d-flex align-items-center gap-2">
                             <button type="button" class="btn btn-sm btn-primary" onclick="applyPathBetweenNodesFilter();">
@@ -679,8 +683,7 @@
 
     const PREFIX_HEX_CHARS = parseInt('{{ prefix_hex_chars|default(2) }}', 10);
     const DEFAULT_PATH_FILTER_MAX_HOPS = 5;
-    const MAX_PATH_FILTER_HOPS = 8;
-    const MAX_PATH_FILTER_RESULTS = 100;
+    const DEFAULT_PATH_FILTER_MAX_RESULTS = 100;
     // Graph prefix length from edges API (2, 4, or 6 hex chars); used for node prefix display and node fetch.
     let graphPrefixHexChars = PREFIX_HEX_CHARS;
     // Format prefix for display: add byte count when multi-byte (2 or 3 bytes)
@@ -747,7 +750,17 @@
         if (!input) return DEFAULT_PATH_FILTER_MAX_HOPS;
 
         const parsed = parseInt(input.value, 10);
-        const value = Math.min(MAX_PATH_FILTER_HOPS, Math.max(1, isNaN(parsed) ? DEFAULT_PATH_FILTER_MAX_HOPS : parsed));
+        const value = Math.max(1, isNaN(parsed) ? DEFAULT_PATH_FILTER_MAX_HOPS : parsed);
+        input.value = value;
+        return value;
+    }
+
+    function normalisePathMaxResults() {
+        const input = document.getElementById('filter-path-max-results');
+        if (!input) return DEFAULT_PATH_FILTER_MAX_RESULTS;
+
+        const parsed = parseInt(input.value, 10);
+        const value = Math.max(1, isNaN(parsed) ? DEFAULT_PATH_FILTER_MAX_RESULTS : parsed);
         input.value = value;
         return value;
     }
@@ -844,7 +857,7 @@
         return { fromNode, toNode };
     }
 
-    function enumerateAllSimplePathsBetweenNodes(fromNode, toNode, maxHops) {
+    function enumerateAllSimplePathsBetweenNodes(fromNode, toNode, maxHops, maxResults) {
         const fromId = getNodeId(fromNode);
         const toId = getNodeId(toNode);
         const adjacency = new Map();
@@ -884,7 +897,7 @@
         });
 
         function dfs(currentId, nodePath, edgePath, visited) {
-            if (paths.length >= MAX_PATH_FILTER_RESULTS) {
+            if (paths.length >= maxResults) {
                 capped = true;
                 return;
             }
@@ -907,7 +920,7 @@
                 nodePath.pop();
                 visited.delete(next.nodeId);
 
-                if (paths.length >= MAX_PATH_FILTER_RESULTS) {
+                if (paths.length >= maxResults) {
                     capped = true;
                     return;
                 }
@@ -929,6 +942,7 @@
         const fromQuery = fromInput ? fromInput.value.trim() : '';
         const toQuery = toInput ? toInput.value.trim() : '';
         const maxHops = normalisePathMaxHops();
+        const maxResults = normalisePathMaxResults();
 
         if (!fromQuery || !toQuery) {
             activeBetweenNodePathFilter = null;
@@ -938,7 +952,7 @@
         }
 
         clearHighlights();
-        activeBetweenNodePathFilter = { fromQuery, toQuery, maxHops };
+        activeBetweenNodePathFilter = { fromQuery, toQuery, maxHops, maxResults };
         applyFilters();
         saveFilters();
     }
@@ -978,7 +992,12 @@
             return;
         }
 
-        const result = enumerateAllSimplePathsBetweenNodes(fromNode, toNode, activeBetweenNodePathFilter.maxHops);
+        const result = enumerateAllSimplePathsBetweenNodes(
+            fromNode,
+            toNode,
+            activeBetweenNodePathFilter.maxHops,
+            activeBetweenNodePathFilter.maxResults
+        );
         if (result.paths.length === 0) {
             setPathFilterStatus('No path found in current filters', 'warning');
             return;
@@ -987,7 +1006,7 @@
         filteredNodes = filteredNodes.filter(node => result.selectedNodes.has(getNodeId(node)));
         filteredEdges = filteredEdges.filter(edge => result.selectedEdges.has(edge));
 
-        const pathText = result.capped ? `${MAX_PATH_FILTER_RESULTS}+ paths` : `${result.paths.length} path${result.paths.length === 1 ? '' : 's'}`;
+        const pathText = result.capped ? `${activeBetweenNodePathFilter.maxResults}+ paths` : `${result.paths.length} path${result.paths.length === 1 ? '' : 's'}`;
         setPathFilterStatus(
             `${pathText}, ${filteredNodes.length} nodes, ${filteredEdges.length} edges`,
             result.capped ? 'warning' : 'success'
@@ -1833,7 +1852,8 @@
                 starredOnly: document.getElementById('filter-starred').checked,
                 evidence: document.getElementById('filter-evidence').value,
                 colorMode: edgeColorMode,
-                pathMaxHops: normalisePathMaxHops()
+                pathMaxHops: normalisePathMaxHops(),
+                pathMaxResults: normalisePathMaxResults()
                 // Note: searchTerm is NOT saved - it should not persist across reloads
             };
             localStorage.setItem('meshGraphFilters', JSON.stringify(filters));
@@ -1876,6 +1896,13 @@
                     if (maxHopsInput) {
                         maxHopsInput.value = filters.pathMaxHops;
                         normalisePathMaxHops();
+                    }
+                }
+                if (filters.pathMaxResults !== undefined && filters.pathMaxResults !== null) {
+                    const maxResultsInput = document.getElementById('filter-path-max-results');
+                    if (maxResultsInput) {
+                        maxResultsInput.value = filters.pathMaxResults;
+                        normalisePathMaxResults();
                     }
                 }
                 // Note: searchTerm is NOT loaded - it should reset on page reload
