@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any
 
 from .base_service import BaseServicePlugin
@@ -30,9 +31,13 @@ class TimeSyncSettings:
     """Validated time-sync service settings."""
 
     channel: str
-    display_name: str
+    identity_name: str
     public_key: bytes
     interval_seconds: int
+    flood_scope: str
+    full_flood_enabled: bool = False
+    text_broadcast_enabled: bool = False
+    text_channel: str = ""
 
 
 class TimeSyncService(BaseServicePlugin):
@@ -41,6 +46,70 @@ class TimeSyncService(BaseServicePlugin):
     config_section = "Time_Sync"
     name = "timesync"
     description = "Authenticated binary MeshCore repeater time-sync source"
+    settings_schema = [
+        {
+            "key": "channel",
+            "label": "Datagram channel",
+            "type": "str",
+            "default": "#time",
+            "required": True,
+            "help": "MeshCore group/public channel used for binary Tv1 group datagrams.",
+            "width": "md",
+        },
+        {
+            "key": "interval_seconds",
+            "label": "Interval",
+            "type": "int",
+            "default": 604800,
+            "min": 1,
+            "unit": "s",
+            "help": "Seconds between automatic time-sync broadcasts.",
+            "width": "sm",
+        },
+        {
+            "key": "flood_scope",
+            "label": "Regional flood scope",
+            "type": "str",
+            "default": "",
+            "required": False,
+            "help": "Required unless full flood is enabled. Full flood uses * and ignores regional scope.",
+            "width": "md",
+        },
+        {
+            "key": "full_flood_enabled",
+            "label": "Allow full flood",
+            "type": "bool",
+            "default": False,
+            "help": "Opt in to global/full-flood time broadcasts; flood_scope is forced to *.",
+            "width": "md",
+        },
+        {
+            "key": "sequence",
+            "label": "Initial sequence",
+            "type": "int",
+            "default": 0,
+            "min": 0,
+            "max": 65535,
+            "help": "Used only when no persisted time_sync.sequence metadata exists.",
+            "width": "sm",
+        },
+        {
+            "key": "text_broadcast_enabled",
+            "label": "Send human-readable text",
+            "type": "bool",
+            "default": False,
+            "help": "Also send a readable channel text announcement after the binary datagram is accepted.",
+            "width": "md",
+        },
+        {
+            "key": "text_channel",
+            "label": "Text channel",
+            "type": "str",
+            "default": "",
+            "help": "Optional text-equivalent channel. Blank sends text to the datagram channel.",
+            "width": "md",
+        },
+    ]
 
     def __init__(self, bot: Any):
         super().__init__(bot)
@@ -76,23 +145,97 @@ class TimeSyncService(BaseServicePlugin):
 
         # Fail early if the configured channel is not currently known by the bot.
         if self.bot.channel_manager.get_channel_number(channel) is None:
-            raise TimeSyncError(f"channel {channel!r} was not found in the MeshCore channel cache")
+            raise TimeSyncError(
+                f"channel {channel!r} was not found in the MeshCore channel cache; "
+                "add it to the radio's configured channels or set [Time_Sync] channel "
+                "to an existing group/public channel"
+            )
 
-        display_name = self.bot.config.get(self.config_section, "display_name", fallback="")
-        validate_display_name(display_name)
+        identity_name = self._bot_identity_name()
 
         interval_seconds = self.bot.config.getint(self.config_section, "interval_seconds", fallback=604800)
         if interval_seconds <= 0:
             raise TimeSyncError("interval_seconds must be greater than zero")
 
+        full_flood_enabled = self.bot.config.getboolean(
+            self.config_section,
+            "full_flood_enabled",
+            fallback=False,
+        )
+        flood_scope = self._load_flood_scope(full_flood_enabled=full_flood_enabled)
+
+        text_broadcast_enabled = self.bot.config.getboolean(
+            self.config_section,
+            "text_broadcast_enabled",
+            fallback=False,
+        )
+        text_channel = self.bot.config.get(self.config_section, "text_channel", fallback="").strip()
+        if (
+            text_broadcast_enabled
+            and text_channel
+            and self.bot.channel_manager.get_channel_number(text_channel) is None
+        ):
+            raise TimeSyncError(
+                f"text_channel {text_channel!r} was not found in the MeshCore channel cache; "
+                "leave it blank to use the datagram channel or set it to an existing text channel"
+            )
+
         public_key = self._bot_public_key()
 
         return TimeSyncSettings(
             channel=channel,
-            display_name=display_name,
+            identity_name=identity_name,
             public_key=public_key,
             interval_seconds=interval_seconds,
+            flood_scope=flood_scope,
+            full_flood_enabled=full_flood_enabled,
+            text_broadcast_enabled=text_broadcast_enabled,
+            text_channel=text_channel,
         )
+
+    @staticmethod
+    def _is_global_flood_scope(scope: str) -> bool:
+        """Return True for scope values that ask firmware to use full flood."""
+        return scope in ("", "*", "0", "None") or scope.lower() == "none"
+
+    @staticmethod
+    def _normalise_flood_scope(scope: str) -> str:
+        """Return the firmware scope token used for regional or global flood."""
+        if TimeSyncService._is_global_flood_scope(scope):
+            return scope
+        if not scope.startswith("#"):
+            return f"#{scope}"
+        return scope
+
+    def _load_flood_scope(self, *, full_flood_enabled: bool) -> str:
+        """Validate the time-sync flood scope policy."""
+        raw_scope = (self.bot.config.get(self.config_section, "flood_scope", fallback="") or "").strip()
+        if full_flood_enabled:
+            return "*"
+
+        flood_scope = self._normalise_flood_scope(raw_scope)
+        if self._is_global_flood_scope(flood_scope):
+            raise TimeSyncError(
+                "regional flood_scope is required unless [Time_Sync] full_flood_enabled is true"
+            )
+        return flood_scope
+
+    def _bot_identity_name(self) -> str:
+        """Return the existing bot/radio identity name used in signed Tv1 payloads."""
+        meshcore = getattr(self.bot, "meshcore", None)
+        self_info = getattr(meshcore, "self_info", None) if meshcore is not None else None
+        device_name: Any = None
+        if isinstance(self_info, dict):
+            device_name = self_info.get("name") or self_info.get("adv_name")
+        elif self_info is not None:
+            device_name = getattr(self_info, "name", None) or getattr(self_info, "adv_name", None)
+
+        # The wider bot code uses [Bot] bot_name as the configured identity and
+        # normally pushes it to the radio at startup.  Fall back to it if the
+        # connected device has not exposed its current name yet.
+        identity_name = str(device_name or self.bot.config.get("Bot", "bot_name", fallback=""))
+        validate_display_name(identity_name)
+        return identity_name
 
     @staticmethod
     def _coerce_public_key_bytes(value: Any) -> bytes:
@@ -189,14 +332,50 @@ class TimeSyncService(BaseServicePlugin):
                 fingerprint = self.public_key_hex()[:12]
             except TimeSyncError:
                 fingerprint = None
+        text_broadcast_enabled = (
+            self._settings.text_broadcast_enabled
+            if self._settings
+            else self.bot.config.getboolean(self.config_section, "text_broadcast_enabled", fallback=False)
+        )
+        text_channel = (
+            self._settings.text_channel
+            if self._settings
+            else self.bot.config.get(self.config_section, "text_channel", fallback="")
+        )
+        flood_scope = (
+            self._settings.flood_scope
+            if self._settings
+            else self.bot.config.get(self.config_section, "flood_scope", fallback="")
+        )
+        full_flood_enabled = (
+            self._settings.full_flood_enabled
+            if self._settings
+            else self.bot.config.getboolean(self.config_section, "full_flood_enabled", fallback=False)
+        )
+
         return {
             "enabled": self.enabled,
             "running": self._running,
-            "channel": self._settings.channel if self._settings else self.bot.config.get(self.config_section, "channel", fallback=""),
-            "display_name": self._settings.display_name if self._settings else self.bot.config.get(self.config_section, "display_name", fallback=""),
+            "channel": (
+                self._settings.channel
+                if self._settings
+                else self.bot.config.get(self.config_section, "channel", fallback="")
+            ),
+            "identity_name": self._settings.identity_name if self._settings else self._status_identity_name(),
             "sequence": self._sequence,
+            "flood_scope": flood_scope,
+            "full_flood_enabled": full_flood_enabled,
+            "text_broadcast_enabled": text_broadcast_enabled,
+            "text_channel": text_channel,
             "public_key_fingerprint": fingerprint,
         }
+
+    def _status_identity_name(self) -> str:
+        """Best-effort identity name for status without raising on invalid config."""
+        try:
+            return self._bot_identity_name()
+        except TimeSyncError:
+            return ""
 
     async def start(self) -> None:
         """Validate configuration and start the periodic announcement loop."""
@@ -218,9 +397,9 @@ class TimeSyncService(BaseServicePlugin):
         self._running = True
         self._task = asyncio.create_task(self._run_loop())
         self.logger.info(
-            "Time sync service started: channel=%s display_name=%r interval=%ss public_key=%s...",
+            "Time sync service started: channel=%s identity_name=%r interval=%ss public_key=%s...",
             self._settings.channel,
-            self._settings.display_name,
+            self._settings.identity_name,
             self._settings.interval_seconds,
             self._settings.public_key.hex()[:12],
         )
@@ -251,14 +430,19 @@ class TimeSyncService(BaseServicePlugin):
         assert self._settings is not None
         while self._running:
             try:
-                await self.send_once()
+                await self.send_once(reload_settings=False)
             except Exception as exc:
                 self.logger.error("Time sync send failed: %s", exc)
             await asyncio.sleep(self._settings.interval_seconds)
 
-    async def send_once(self, *, timestamp: int | None = None) -> bool:
-        """Build, sign, and enqueue one binary time-sync datagram."""
-        if self._settings is None:
+    async def send_once(self, *, timestamp: int | None = None, reload_settings: bool = True) -> bool:
+        """Build, sign, and enqueue one binary time-sync datagram.
+
+        Manual sends reload settings by default so a just-saved full-flood or
+        regional-scope change is used immediately. The periodic loop opts out
+        because its sleep interval is tied to the settings loaded at startup.
+        """
+        if reload_settings or self._settings is None:
             self._settings = self._load_settings()
         settings = self._settings
 
@@ -275,7 +459,7 @@ class TimeSyncService(BaseServicePlugin):
         channel_id = derive_time_sync_channel_id(channel_secret)
         canonical = build_time_sync_canonical(
             channel_id,
-            settings.display_name,
+            settings.identity_name,
             unix_seconds,
             sequence,
         )
@@ -284,7 +468,7 @@ class TimeSyncService(BaseServicePlugin):
         # repeater already has the full public key pinned in its configuration.
         signature = await self._sign_with_bot_identity(canonical)
         tv1_payload = build_time_sync_payload(
-            settings.display_name,
+            settings.identity_name,
             unix_seconds,
             sequence,
             signature,
@@ -296,8 +480,42 @@ class TimeSyncService(BaseServicePlugin):
             tv1_payload,
             command_id=f"time_sync_{settings.channel}_{unix_seconds}_{sequence}",
             skip_user_rate_limit=True,
+            scope=settings.flood_scope,
         )
         if sent:
+            if settings.text_broadcast_enabled:
+                await self._send_text_broadcast(settings, unix_seconds, sequence)
             self._sequence = next_sequence(sequence)
-            self._persist_sequence()
+            self._persist_sequence(force=reload_settings)
         return sent
+
+    @staticmethod
+    def _format_text_broadcast(identity_name: str, unix_seconds: int, sequence: int) -> str:
+        """Return the optional human-readable companion message for a Tv1 datagram."""
+        iso_utc = datetime.fromtimestamp(unix_seconds, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+        return f"Time sync: {iso_utc} (unix {unix_seconds}, seq {sequence}, source {identity_name})"
+
+    async def _send_text_broadcast(
+        self,
+        settings: TimeSyncSettings,
+        unix_seconds: int,
+        sequence: int,
+    ) -> None:
+        """Best-effort text companion to the authoritative binary datagram."""
+        channel = settings.text_channel or settings.channel
+        text = self._format_text_broadcast(settings.identity_name, unix_seconds, sequence)
+        try:
+            sent = await self.bot.command_manager.send_channel_message(
+                channel,
+                text,
+                command_id=f"time_sync_text_{channel}_{unix_seconds}_{sequence}",
+                skip_user_rate_limit=True,
+                scope=settings.flood_scope,
+                timestamp=datetime.fromtimestamp(unix_seconds, tz=timezone.utc),
+            )
+        except Exception as exc:
+            self.logger.warning("Time sync text broadcast failed for channel %s: %s", channel, exc)
+            return
+
+        if not sent:
+            self.logger.warning("Time sync text broadcast failed for channel %s", channel)

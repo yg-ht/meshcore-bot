@@ -1158,6 +1158,12 @@ graph_capture_enabled = true
 # Default: 2.5 (starred repeaters get 2.5x their normal score)
 # Set to 1.0 to disable star bias
 star_bias_multiplier = 2.5
+
+# Symbols shown next to inferred repeater names to indicate confidence
+# in the path guess (high / medium / low).
+high_confidence_symbol = 🎯
+medium_confidence_symbol = 📍
+low_confidence_symbol = ❓
 [Joke_Command]
 # Enable or disable the joke command (true/false)
 enabled = true
@@ -1290,6 +1296,12 @@ levenshtein_distance = 0
 # Enable or disable the alert command (true/false)
 enabled = false
 
+# Only report incidents within this distance of the bot (kilometers)
+max_distance_km = 20.0
+
+# Only report incidents newer than this (hours)
+max_incident_age_hours = 24.0
+
 # PulsePoint agency IDs by city or county
 # Format: agency.city.<name> = comma-separated agency IDs
 #         agency.county.<name> = comma-separated agency IDs
@@ -1357,6 +1369,12 @@ url_timeout = 10
 # Command stubs (enable/channels only; omit to use global monitor_channels)
 [Wx_Command]
 enabled = true
+
+# Temperature unit for weather reports: fahrenheit (default) or celsius
+temperature_unit = fahrenheit
+
+# Wind speed unit for weather reports: mph (default) or kmh
+wind_speed_unit = mph
 # channels =
 # aliases = comma-separated additional trigger words, e.g.: aliases = weather, w
 
@@ -1599,14 +1617,17 @@ decode_hashtag_channels =
 # Sends PAYLOAD_TYPE_GRP_DATA with inner data_type 0x0121. Disabled by default.
 enabled = false
 
-# MeshCore group/public channel name as configured on the radio, e.g. #time.
-channel =
-
-# Exact display name expected by repeater firmware. Case-sensitive, 1..20 UTF-8 bytes, no CR/LF.
-display_name =
+# MeshCore group/public channel name as configured on the radio.
+# For hashtag channels include the leading "#", e.g. #time. Without "#",
+# "time" is treated as a custom/private channel name, not the #time hashtag.
+# For the default public channel use Public.
+channel = #time
 
 # Time sync signs with the existing MeshCore bot/radio identity. Use the
 # "timesync publickey" admin command to retrieve the public key for repeaters.
+# The Tv1 display-name field is taken from the existing bot/radio identity name,
+# normally [Bot] bot_name after the standard startup name sync. It is not
+# configured separately here.
 
 # Initial uint16 sequence when no persisted sequence exists in bot_metadata.
 # Valid range: 0 to 65535.
@@ -1614,6 +1635,25 @@ sequence = 0
 
 # Announcement interval in seconds. Default is 604800 seconds (1 week).
 interval_seconds = 604800
+
+# Regional flood scope for time broadcasts. Required by default so time sync
+# does not full-flood the whole mesh accidentally. Use the same scope name used
+# by your regional MeshCore flood scope, e.g. #west.
+flood_scope =
+
+# Explicit opt-in for global/full-flood time broadcasts. Leave false for normal
+# regional operation; set true only when the time source should reach the full
+# flood domain.
+full_flood_enabled = false
+
+# Optional human-readable text companion sent after the binary datagram is
+# accepted by the MeshCore send API. The signed binary datagram remains the
+# authoritative time-sync packet; this is only for operator visibility.
+text_broadcast_enabled = false
+
+# Optional text-equivalent channel for the human-readable companion message.
+# Leave blank to send the text companion to the same channel as the datagram.
+text_channel =
 
 ####################################################################################################
 [PacketCapture]
@@ -1640,6 +1680,10 @@ raw_duplicate_window = 2.0
 
 # Keep RX_LOG SNR/RSSI keyed by packet prefix this long for RAW_DATA correlation (seconds).
 rf_data_cache_timeout = 15.0
+
+# Master switch for MQTT publishing (true/false). When false, packets are only
+# written to output_file (if set) and no MQTT connections are made.
+mqtt_enabled = true
 
 # If true, do not publish packet JSON to MQTT when content hash is 0000000000000000
 # (strict path_len reject, too-short buffer, or other unparseable cases). File output is unchanged.

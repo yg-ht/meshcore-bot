@@ -16,6 +16,20 @@ A browser-based dashboard for monitoring and managing your MeshCore bot. The vie
 - **API Explorer** — Interactive API documentation at `/api-explorer`
 - **Operational banners** — Initializing, zombie-radio, and radio-offline alerts when applicable
 - **Version footer** — Displays resolved bot version
+- **Dashboard** — Overview of database statistics and bot status
+- **Contacts** — Live contact list with signal, path, and location; star contacts; purge inactive contacts; export CSV/JSON
+- **Mesh graph** — Interactive node graph at `/mesh`
+- **Radio** — Channel management, reboot, connect/disconnect, radio parameters, node settings, and device writes via queued bot operations
+- **Feeds** — RSS/API feed subscriptions per channel
+- **Packets** — Raw packet monitor
+- **Live activity** — Real-time packet/command/message feed at `/realtime` (pause and clear)
+- **Logs** — Real-time log viewer at `/logs` with level filtering
+- **Config** — SMTP, log rotation, backups, maintenance status, and database tools at `/config`
+- **Plugins page** — Toggle commands and services and edit settings from the browser; config writes preserve comments and take timestamped backups
+- **Admin config** — Read-only effective config with secrets redacted at `/admin/config`
+- **API Explorer** — Interactive API documentation at `/api-explorer`
+- **Operational banners** — Initializing, zombie-radio, and radio-offline alerts when applicable
+- **Version footer** — Displays resolved bot version
 
 For SMTP and nightly maintenance email details, see the [README Web Viewer section](https://github.com/agessaman/meshcore-bot/blob/main/README.md#web-viewer).
 
@@ -154,7 +168,7 @@ proxy_set_header X-Forwarded-Proto $scheme;
 | `/` | Dashboard — database stats, quick navigation |
 | `/contacts` | Repeater contacts and contact tracking |
 | `/mesh` | Interactive mesh network graph |
-| `/radio` | Radio settings and control |
+| `/radio` | Radio settings and control, including channel management, radio parameters, node settings, and queued device writes |
 | `/feeds` | Feed manager subscriptions |
 | `/realtime` | Live packet, command, and message activity |
 | `/logs` | Real-time bot log stream |

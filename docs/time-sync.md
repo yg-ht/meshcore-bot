@@ -2,7 +2,7 @@
 
 MeshCore-Bot can act as a source for authenticated repeater time synchronisation. This is source-side only: MeshCore repeater firmware performs verification and clock policy.
 
-The feature is disabled by default and sends binary MeshCore group datagrams only. It does not send group text fallbacks.
+The feature is disabled by default and sends binary MeshCore group datagrams. It can optionally send a human-readable channel text companion for operator visibility, but repeater firmware uses only the signed binary datagram.
 
 ## Configuration
 
@@ -12,14 +12,27 @@ Add or update `[Time_Sync]` in `config.ini`:
 [Time_Sync]
 enabled = true
 channel = #time
-display_name = TimeBot
 sequence = 0
 interval_seconds = 604800
+flood_scope = #west
+full_flood_enabled = false
+text_broadcast_enabled = false
+text_channel =
 ```
 
-`channel` must match a configured MeshCore group/public channel. `display_name` is exact and case-sensitive, must be 1..20 UTF-8 bytes, and must not contain carriage return or line feed.
+`channel` must match a MeshCore group/public channel already configured on the radio. The bot does not create the channel at time-sync startup, because the signed datagram must still use the normal MeshCore channel encryption/MAC send path. For hashtag channels, include the leading `#`, for example `#time`; `time` without `#` is treated as a different custom/private channel name. For the default public channel, use `Public`.
+
+The example default is `#time`, but that channel must still exist on the connected radio. If the startup log says `channel '#time' was not found in the MeshCore channel cache`, either add the `#time` channel to the radio or change `[Time_Sync] channel` to an existing configured channel.
+
+The Tv1 display-name field is taken from the existing bot/radio identity name, not from `[Time_Sync]`. In normal deployments this is `[Bot] bot_name`, because MeshCore-Bot already synchronises that value to the radio device name at startup when `auto_update_device_name = true`. The repeater firmware must be configured with that exact identity name. It is case-sensitive, must be 1..20 UTF-8 bytes, and must not contain carriage return or line feed.
 
 Time sync signs with the existing MeshCore bot/radio identity. It does not use a separate time-sync private key. The default interval is `604800` seconds, which is one week.
+
+`flood_scope` is required by default and must be a regional MeshCore flood scope such as `#west`. The bot applies this scope to the signed binary datagram and to the optional text companion. This prevents time broadcasts from full-flooding the whole mesh unless that is explicitly requested.
+
+Set `full_flood_enabled = true` only when this source should send global/full-flood time broadcasts. When enabled, the service ignores `flood_scope` and sends with the global `*` scope.
+
+`text_broadcast_enabled` optionally sends a human-readable companion message after the binary datagram has been accepted by the MeshCore send API. This text message is not used by repeater firmware for time synchronisation, is not signed as a protocol payload, and should be treated as operator-visible context only. If `text_channel` is blank, the companion text is sent to the same channel as `channel`. If `text_channel` is set, it must also be a MeshCore group/public channel already known to the connected radio.
 
 To authorise the admin command, include `timesync` in `[Admin_ACL] admin_commands` and set `admin_pubkeys`.
 
@@ -30,8 +43,12 @@ Repeaters must be configured with the full 32-byte Ed25519 public key correspond
 DM the bot as an admin:
 
 ```text
+timesync status
+timesync send
 timesync publickey
 ```
+
+`timesync send` broadcasts one signed time-sync datagram immediately. The periodic sender still runs on `interval_seconds`.
 
 The response is exactly 64 lowercase hexadecimal characters. Normal status output shows only a public-key fingerprint.
 
@@ -81,7 +98,7 @@ There is a final newline after the sequence line.
 channel-id = SHA-256(raw 16-byte channel secret)
 ```
 
-For hashtag channels, the raw channel secret is the first 16 bytes of `SHA-256(lowercase "#channel")`. For the Public channel, MeshCore-Bot uses MeshCore's fixed public-channel secret. Do not use MeshCore's one-byte channel hash for signatures; that hash is only a transport lookup value.
+For hashtag channels, the configured channel name must include the leading `#`, and the raw channel secret is the first 16 bytes of `SHA-256(lowercase "#channel")`. For example, configure `channel = #time`, not `channel = time`, when the repeater is using the `#time` hashtag channel. For the Public channel, MeshCore-Bot uses MeshCore's fixed public-channel secret. Do not use MeshCore's one-byte channel hash for signatures; that hash is only a transport lookup value.
 
 ## Sequence Persistence
 
@@ -99,7 +116,7 @@ Protect the MeshCore bot identity. Anyone with the bot identity private key can 
 
 ## Deterministic Vector
 
-For `#time`, display name `TimeBot`, timestamp `1783862400`, sequence `12345`, and the deterministic test key in `tests/test_time_sync.py`:
+For `#time`, bot identity name `TimeBot`, timestamp `1783862400`, sequence `12345`, and the deterministic test key in `tests/test_time_sync.py`:
 
 ```text
 channel secret = 5d13043d9a5e61bc61aeb63208f5c64e

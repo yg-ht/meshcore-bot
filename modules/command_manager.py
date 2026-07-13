@@ -16,8 +16,10 @@ from meshcore import EventType
 
 from .command_prefix import (
     load_command_prefix_settings,
-    normalize_command_content as normalize_command_content_text,
     parse_command_prefixes,
+)
+from .command_prefix import (
+    normalize_command_content as normalize_command_content_text,
 )
 from .commands.base_command import BaseCommand
 from .config_validation import (
@@ -30,6 +32,11 @@ from .models import CHANNEL_REGIONAL_FLOOD_SCOPE_BODY_OVERHEAD, MeshMessage
 from .plugin_loader import PluginLoader
 from .security_utils import sanitize_name, validate_safe_path
 from .utils import check_internet_connectivity_async, decode_escape_sequences, format_keyword_response_with_placeholders
+
+
+CMD_SEND_CHANNEL_DATA = 0x3E
+CHANNEL_DATA_FLOOD_PATH_LEN = 0xFF
+MAX_CHANNEL_DATA_PAYLOAD_BYTES = 163
 
 
 @dataclass
@@ -1333,13 +1340,15 @@ class CommandManager:
         command_id: str | None = None,
         skip_user_rate_limit: bool = True,
         rate_limit_key: str | None = None,
+        scope: str | None = None,
     ) -> bool:
         """Send a binary MeshCore group datagram without using group text.
 
         The MeshCore firmware group-datagram plaintext is:
         ``data_type`` as uint16 little-endian, ``data_len`` as uint8, then raw
         ``data`` bytes.  The underlying MeshCore command API is still
-        responsible for channel encryption/MAC and transport framing.
+        responsible for channel encryption/MAC and transport framing. Optional
+        ``scope`` follows the same regional flood handling as channel text.
         """
         if not self.bot.connected or not self.bot.meshcore:
             return False
@@ -1356,8 +1365,14 @@ class CommandManager:
         if data_type < 0 or data_type > 0xFFFF:
             self.logger.error("Group datagram data_type must be a uint16 value")
             return False
-        if len(data) > 0xFF:
-            self.logger.error("Group datagram data payload exceeds 255 bytes")
+        if data_type == 0:
+            self.logger.error("Group datagram data_type 0x0000 is reserved")
+            return False
+        if len(data) > MAX_CHANNEL_DATA_PAYLOAD_BYTES:
+            self.logger.error(
+                "Group datagram data payload exceeds %d bytes",
+                MAX_CHANNEL_DATA_PAYLOAD_BYTES,
+            )
             return False
 
         can_send, reason = await self._check_rate_limits(
@@ -1398,7 +1413,37 @@ class CommandManager:
             except Exception as e:
                 self.logger.debug(f"Error recording group datagram transmission: {e}")
 
+            resolved = self.resolve_channel_send_scope(scope=scope, channel=channel)
+            scope_to_use = (
+                resolved if resolved is not None else self._outgoing_flood_scope_override()
+            ) or ""
+            scope_is_global = scope_to_use in ("", "*", "0", "None") or scope_to_use.lower() == "none"
+            if not scope_is_global:
+                scope_to_use = self._normalize_scope_name(scope_to_use)
+
             commands = self.bot.meshcore.commands
+            if scope_is_global:
+                self.logger.debug("Outbound group datagram flood scope: global (no set_flood_scope)")
+            elif not hasattr(commands, "set_flood_scope"):
+                self.logger.warning(
+                    "Regional flood scope %r requested but meshcore.commands.set_flood_scope "
+                    "is unavailable; group datagram will use device default (often global flood)",
+                    scope_to_use,
+                )
+            else:
+                self.logger.info(
+                    "Outbound group datagram flood scope: %s (set_flood_scope)",
+                    scope_to_use,
+                )
+                _scope_result = await commands.set_flood_scope(scope_to_use)
+                if _scope_result is None or getattr(_scope_result, "type", None) == "ERROR":
+                    self.logger.warning(
+                        "set_flood_scope(%s) failed (result=%s); "
+                        "group datagram will be sent with current firmware scope",
+                        scope_to_use,
+                        _scope_result,
+                    )
+
             candidates = (
                 "send_chan_data",
                 "send_grp_data",
@@ -1407,37 +1452,67 @@ class CommandManager:
             )
             result = None
             last_type_error: TypeError | None = None
+            found_send_api = False
 
-            for method_name in candidates:
-                method = getattr(commands, method_name, None)
-                if method is None:
-                    continue
-
-                # MeshCore Python releases have not exposed one stable name for
-                # binary group data.  Try the safer explicit form first, then
-                # the pre-wrapped datagram form used by lower-level wrappers.
-                try:
-                    result = await method(channel_num, data_type, data)
-                    break
-                except TypeError as exc:
-                    last_type_error = exc
-                    try:
-                        result = await method(channel_num, datagram_data)
-                        break
-                    except TypeError as exc2:
-                        last_type_error = exc2
+            try:
+                for method_name in candidates:
+                    method = getattr(commands, method_name, None)
+                    if method is None:
                         continue
+                    found_send_api = True
+
+                    # MeshCore Python releases have not exposed one stable name for
+                    # binary group data.  Try the safer explicit form first, then
+                    # the pre-wrapped datagram form used by lower-level wrappers.
+                    try:
+                        result = await method(channel_num, data_type, data)
+                        break
+                    except TypeError as exc:
+                        last_type_error = exc
+                        try:
+                            result = await method(channel_num, datagram_data)
+                            break
+                        except TypeError as exc2:
+                            last_type_error = exc2
+                            continue
+
+                if result is None:
+                    send_method = getattr(commands, "send", None)
+                    if send_method is not None:
+                        # meshcore==2.3.7 exposes the firmware's generic command
+                        # sender, but not a named channel-data helper.  Command 62
+                        # is CMD_SEND_CHANNEL_DATA; path_len 0xFF means flood on
+                        # send, and the firmware wraps/encrypts the GRP_DATA packet.
+                        command_frame = (
+                            bytes([CMD_SEND_CHANNEL_DATA, channel_num, CHANNEL_DATA_FLOOD_PATH_LEN])
+                            + data_type.to_bytes(2, byteorder="little")
+                            + data
+                        )
+                        result = await send_method(command_frame, [EventType.OK, EventType.ERROR])
+            finally:
+                if not scope_is_global and hasattr(commands, "set_flood_scope"):
+                    _restore_result = await commands.set_flood_scope("*")
+                    if _restore_result is None or getattr(_restore_result, "type", None) == "ERROR":
+                        self.logger.warning(
+                            "set_flood_scope('*') restore failed after group datagram (result=%s)",
+                            _restore_result,
+                        )
 
             if result is None:
                 if last_type_error:
                     self.logger.error(
-                        "MeshCore group datagram send API was found but rejected supported call shapes: %s",
+                        "MeshCore group datagram send API was found but rejected supported call shapes "
+                        "and CMD_SEND_CHANNEL_DATA fallback returned no result: %s",
                         last_type_error,
+                    )
+                elif found_send_api:
+                    self.logger.error(
+                        "MeshCore group datagram send API was found but returned no result"
                     )
                 else:
                     self.logger.error(
                         "MeshCore group datagram send API is unavailable; need send_chan_data, "
-                        "send_grp_data, send_group_data, or send_group_datagram"
+                        "send_grp_data, send_group_data, send_group_datagram, or generic send"
                     )
                 return False
 
