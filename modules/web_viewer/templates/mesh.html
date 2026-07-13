@@ -225,6 +225,7 @@
                             <option value="2">Last 48 Hours</option>
                             <option value="3" selected>Last 72 Hours</option>
                             <option value="7">Last 7 Days</option>
+                            <option value="14">Last 14 Days</option>
                             <option value="30">Last 30 Days</option>
                             <option value="90">Last 90 Days</option>
                         </select>
@@ -237,6 +238,7 @@
                             <option value="2">Last 48 Hours</option>
                             <option value="3" selected>Last 72 Hours</option>
                             <option value="7">Last 7 Days</option>
+                            <option value="14">Last 14 Days</option>
                             <option value="30">Last 30 Days</option>
                             <option value="90">Last 90 Days</option>
                         </select>
@@ -246,6 +248,14 @@
                         <select class="form-select" id="filter-evidence" onchange="onEvidenceChange();" title="Multi-byte only: build the graph solely from unique multi-byte path observations, ignoring ambiguous single-byte evidence">
                             <option value="all">All Evidence</option>
                             <option value="multibyte" selected>Multi-byte Only</option>
+                        </select>
+                    </div>
+                    <div class="col-md-2">
+                        <label for="filter-directionality" class="form-label">Directionality</label>
+                        <select class="form-select" id="filter-directionality" onchange="applyFilters(); saveFilters();">
+                            <option value="all" selected>All Routes</option>
+                            <option value="bidirectional">Bidirectional Only</option>
+                            <option value="oneway">One-way Only</option>
                         </select>
                     </div>
                     <div class="col-md-2">
@@ -273,11 +283,11 @@
                     </div>
                     <div class="col-md-2">
                         <label for="filter-path-max-hops" class="form-label">Max Hops</label>
-                        <input type="number" class="form-control" id="filter-path-max-hops" min="1" value="5" onchange="normalisePathMaxHops();">
+                        <input type="number" class="form-control" id="filter-path-max-hops" min="1" value="5" data-auto-default="true" oninput="markPathMaxHopsManual();" onchange="normalisePathMaxHops();">
                     </div>
                     <div class="col-md-2">
                         <label for="filter-path-max-results" class="form-label">Max Paths</label>
-                        <input type="number" class="form-control" id="filter-path-max-results" min="1" value="100" onchange="normalisePathMaxResults();">
+                        <input type="number" class="form-control" id="filter-path-max-results" min="1" value="10" onchange="normalisePathMaxResults();">
                     </div>
                     <div class="col-md-2">
                         <label class="form-label">&nbsp;</label>
@@ -683,7 +693,7 @@
 
     const PREFIX_HEX_CHARS = parseInt('{{ prefix_hex_chars|default(2) }}', 10);
     const DEFAULT_PATH_FILTER_MAX_HOPS = 5;
-    const DEFAULT_PATH_FILTER_MAX_RESULTS = 100;
+    const DEFAULT_PATH_FILTER_MAX_RESULTS = 10;
     // Graph prefix length from edges API (2, 4, or 6 hex chars); used for node prefix display and node fetch.
     let graphPrefixHexChars = PREFIX_HEX_CHARS;
     // Format prefix for display: add byte count when multi-byte (2 or 3 bytes)
@@ -738,6 +748,26 @@
         return prefixesCompatible(edge.from_prefix, node.prefix) || prefixesCompatible(edge.to_prefix, node.prefix);
     }
 
+    function getEdgeIdentity(edge) {
+        const fromIdentity = edge.from_public_key || edge.from_prefix || '';
+        const toIdentity = edge.to_public_key || edge.to_prefix || '';
+        return { fromIdentity, toIdentity };
+    }
+
+    function edgeMatchesIdentity(edge, fromIdentity, toIdentity) {
+        const identity = getEdgeIdentity(edge);
+        return identity.fromIdentity === fromIdentity && identity.toIdentity === toIdentity;
+    }
+
+    function hasReverseEdge(edge, edgeSet = allEdges) {
+        const identity = getEdgeIdentity(edge);
+        if (!identity.fromIdentity || !identity.toIdentity) return false;
+        return edgeSet.some(candidate => {
+            if (candidate === edge) return false;
+            return edgeMatchesIdentity(candidate, identity.toIdentity, identity.fromIdentity);
+        });
+    }
+
     function setPathFilterStatus(message, level = 'muted') {
         const status = document.getElementById('path-filter-status');
         if (!status) return;
@@ -753,6 +783,23 @@
         const value = Math.max(1, isNaN(parsed) ? DEFAULT_PATH_FILTER_MAX_HOPS : parsed);
         input.value = value;
         return value;
+    }
+
+    function markPathMaxHopsManual() {
+        const input = document.getElementById('filter-path-max-hops');
+        if (input) input.dataset.autoDefault = 'false';
+    }
+
+    function pathMaxHopsUsesAutoDefault() {
+        const input = document.getElementById('filter-path-max-hops');
+        return !input || input.dataset.autoDefault !== 'false';
+    }
+
+    function setAutoPathMaxHops(value) {
+        const input = document.getElementById('filter-path-max-hops');
+        if (!input) return;
+        input.value = Math.max(1, value || DEFAULT_PATH_FILTER_MAX_HOPS);
+        input.dataset.autoDefault = 'true';
     }
 
     function normalisePathMaxResults() {
@@ -857,14 +904,8 @@
         return { fromNode, toNode };
     }
 
-    function enumerateAllSimplePathsBetweenNodes(fromNode, toNode, maxHops, maxResults) {
-        const fromId = getNodeId(fromNode);
-        const toId = getNodeId(toNode);
+    function buildUndirectedPathAdjacency() {
         const adjacency = new Map();
-        const selectedNodes = new Set();
-        const selectedEdges = new Set();
-        const paths = [];
-        let capped = false;
 
         filteredEdges.forEach(edge => {
             const { fromNode: edgeFrom, toNode: edgeTo } = resolveRenderableEdge(edge);
@@ -895,6 +936,38 @@
                 Array.from(neighbourMap.values()).sort((a, b) => b.bestObservation - a.bestObservation)
             );
         });
+
+        return adjacency;
+    }
+
+    function findShortestHopCountBetweenNodes(fromNode, toNode, adjacency) {
+        const fromId = getNodeId(fromNode);
+        const toId = getNodeId(toNode);
+        const visited = new Set([fromId]);
+        const queue = [{ nodeId: fromId, hops: 0 }];
+
+        while (queue.length) {
+            const current = queue.shift();
+            if (current.nodeId === toId) return current.hops;
+
+            const neighbours = adjacency.get(current.nodeId) || [];
+            for (const next of neighbours) {
+                if (visited.has(next.nodeId)) continue;
+                visited.add(next.nodeId);
+                queue.push({ nodeId: next.nodeId, hops: current.hops + 1 });
+            }
+        }
+
+        return null;
+    }
+
+    function enumerateAllSimplePathsBetweenNodes(fromNode, toNode, maxHops, maxResults, adjacency) {
+        const fromId = getNodeId(fromNode);
+        const toId = getNodeId(toNode);
+        const selectedNodes = new Set();
+        const selectedEdges = new Set();
+        const paths = [];
+        let capped = false;
 
         function dfs(currentId, nodePath, edgePath, visited) {
             if (paths.length >= maxResults) {
@@ -941,7 +1014,6 @@
         const toInput = document.getElementById('filter-path-to');
         const fromQuery = fromInput ? fromInput.value.trim() : '';
         const toQuery = toInput ? toInput.value.trim() : '';
-        const maxHops = normalisePathMaxHops();
         const maxResults = normalisePathMaxResults();
 
         if (!fromQuery || !toQuery) {
@@ -952,7 +1024,12 @@
         }
 
         clearHighlights();
-        activeBetweenNodePathFilter = { fromQuery, toQuery, maxHops, maxResults };
+        activeBetweenNodePathFilter = {
+            fromQuery,
+            toQuery,
+            maxHops: pathMaxHopsUsesAutoDefault() ? null : normalisePathMaxHops(),
+            maxResults,
+        };
         applyFilters();
         saveFilters();
     }
@@ -964,6 +1041,7 @@
         const toInput = document.getElementById('filter-path-to');
         if (fromInput) fromInput.value = '';
         if (toInput) toInput.value = '';
+        setAutoPathMaxHops(DEFAULT_PATH_FILTER_MAX_HOPS);
 
         setPathFilterStatus('');
         applyFilters();
@@ -992,13 +1070,30 @@
             return;
         }
 
+        const adjacency = buildUndirectedPathAdjacency();
+        const shortestHops = findShortestHopCountBetweenNodes(fromNode, toNode, adjacency);
+        if (shortestHops === null) {
+            filteredNodes = [];
+            filteredEdges = [];
+            setPathFilterStatus('No path found in current filters', 'warning');
+            return;
+        }
+
+        const maxHops = activeBetweenNodePathFilter.maxHops || shortestHops;
+        if (!activeBetweenNodePathFilter.maxHops) {
+            setAutoPathMaxHops(shortestHops);
+        }
+
         const result = enumerateAllSimplePathsBetweenNodes(
             fromNode,
             toNode,
-            activeBetweenNodePathFilter.maxHops,
-            activeBetweenNodePathFilter.maxResults
+            maxHops,
+            activeBetweenNodePathFilter.maxResults,
+            adjacency
         );
         if (result.paths.length === 0) {
+            filteredNodes = [];
+            filteredEdges = [];
             setPathFilterStatus('No path found in current filters', 'warning');
             return;
         }
@@ -1851,8 +1946,10 @@
                 nodeDays: document.getElementById('filter-node-days').value,
                 starredOnly: document.getElementById('filter-starred').checked,
                 evidence: document.getElementById('filter-evidence').value,
+                directionality: document.getElementById('filter-directionality').value,
                 colorMode: edgeColorMode,
                 pathMaxHops: normalisePathMaxHops(),
+                pathMaxHopsManual: !pathMaxHopsUsesAutoDefault(),
                 pathMaxResults: normalisePathMaxResults()
                 // Note: searchTerm is NOT saved - it should not persist across reloads
             };
@@ -1888,15 +1985,21 @@
                 if (filters.evidence === 'all' || filters.evidence === 'multibyte') {
                     document.getElementById('filter-evidence').value = filters.evidence;
                 }
+                if (filters.directionality === 'all' || filters.directionality === 'bidirectional' || filters.directionality === 'oneway') {
+                    document.getElementById('filter-directionality').value = filters.directionality;
+                }
                 if (filters.colorMode === 'age' || filters.colorMode === 'heat') {
                     edgeColorMode = filters.colorMode;
                 }
-                if (filters.pathMaxHops !== undefined && filters.pathMaxHops !== null) {
+                if (filters.pathMaxHopsManual && filters.pathMaxHops !== undefined && filters.pathMaxHops !== null) {
                     const maxHopsInput = document.getElementById('filter-path-max-hops');
                     if (maxHopsInput) {
                         maxHopsInput.value = filters.pathMaxHops;
+                        maxHopsInput.dataset.autoDefault = 'false';
                         normalisePathMaxHops();
                     }
+                } else {
+                    setAutoPathMaxHops(DEFAULT_PATH_FILTER_MAX_HOPS);
                 }
                 if (filters.pathMaxResults !== undefined && filters.pathMaxResults !== null) {
                     const maxResultsInput = document.getElementById('filter-path-max-results');
@@ -1923,6 +2026,7 @@
         const edgeDays = document.getElementById('filter-edge-days').value;
         const nodeDays = document.getElementById('filter-node-days').value;
         const starredOnly = document.getElementById('filter-starred').checked;
+        const directionality = document.getElementById('filter-directionality').value;
         const searchTerm = document.getElementById('filter-search').value.toLowerCase();
         
         // Filter edges
@@ -1934,6 +2038,8 @@
                 cutoffDate.setDate(cutoffDate.getDate() - parseInt(edgeDays));
                 if (edgeDate < cutoffDate) return false;
             }
+            if (directionality === 'bidirectional' && !hasReverseEdge(edge, allEdges)) return false;
+            if (directionality === 'oneway' && hasReverseEdge(edge, allEdges)) return false;
             return true;
         });
         

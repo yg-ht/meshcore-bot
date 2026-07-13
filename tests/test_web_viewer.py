@@ -249,13 +249,18 @@ class TestPageRoutes:
         html = resp.data.decode()
         assert 'id="filter-path-from"' in html
         assert 'id="filter-path-to"' in html
+        assert 'id="filter-directionality"' in html
+        assert '<option value="bidirectional">Bidirectional Only</option>' in html
+        assert '<option value="oneway">One-way Only</option>' in html
         assert 'id="filter-path-max-hops"' in html
         assert 'id="filter-path-max-results"' in html
         assert 'value="5"' in html
-        assert 'value="100"' in html
+        assert 'value="10"' in html
+        assert '<option value="14">Last 14 Days</option>' in html
         assert 'id="filter-path-max-hops" min="1" value="5"' in html
-        assert 'id="filter-path-max-results" min="1" value="100"' in html
-        assert 'DEFAULT_PATH_FILTER_MAX_RESULTS = 100' in html
+        assert 'id="filter-path-max-results" min="1" value="10"' in html
+        assert 'DEFAULT_PATH_FILTER_MAX_RESULTS = 10' in html
+        assert 'function findShortestHopCountBetweenNodes' in html
         assert 'function enumerateAllSimplePathsBetweenNodes' in html
         assert 'function applyPathBetweenNodesFilter' in html
         assert 'function clearPathBetweenNodesFilter' in html
