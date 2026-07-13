@@ -260,6 +260,9 @@ class TestPageRoutes:
         assert 'id="filter-path-max-hops" min="1" value="5"' in html
         assert 'id="filter-path-max-results" min="1" value="10"' in html
         assert 'DEFAULT_PATH_FILTER_MAX_RESULTS = 10' in html
+        assert 'GRAPH_PATH_ANCHOR_MIN_DISTANCE = 450' in html
+        assert 'function getActivePathAnchorNodeIds' in html
+        assert 'function getGraphPathAnchorOffset' in html
         assert 'function findShortestHopCountBetweenNodes' in html
         assert 'function enumerateAllSimplePathsBetweenNodes' in html
         assert 'function applyPathBetweenNodesFilter' in html
