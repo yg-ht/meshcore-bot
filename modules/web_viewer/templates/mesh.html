@@ -694,6 +694,8 @@
     const PREFIX_HEX_CHARS = parseInt('{{ prefix_hex_chars|default(2) }}', 10);
     const DEFAULT_PATH_FILTER_MAX_HOPS = 5;
     const DEFAULT_PATH_FILTER_MAX_RESULTS = 10;
+    const GRAPH_PATH_ANCHOR_MIN_DISTANCE = 450;
+    const GRAPH_PATH_ANCHOR_VIEWPORT_RATIO = 0.35;
     // Graph prefix length from edges API (2, 4, or 6 hex chars); used for node prefix display and node fetch.
     let graphPrefixHexChars = PREFIX_HEX_CHARS;
     // Format prefix for display: add byte count when multi-byte (2 or 3 bytes)
@@ -892,6 +894,26 @@
             return (a.node.name || '').localeCompare(b.node.name || '');
         });
         return matches.length ? matches[0].node : null;
+    }
+
+    function getActivePathAnchorNodeIds(availableNodes) {
+        if (!activeBetweenNodePathFilter) {
+            return { fromId: null, toId: null };
+        }
+
+        // Resolve anchors against the currently visible graph so old filter text
+        // cannot pin hidden or stale nodes after other filters have changed.
+        const fromNode = resolvePathFilterNode(activeBetweenNodePathFilter.fromQuery, availableNodes);
+        const toNode = resolvePathFilterNode(activeBetweenNodePathFilter.toQuery, availableNodes);
+        return {
+            fromId: fromNode ? getNodeId(fromNode) : null,
+            toId: toNode ? getNodeId(toNode) : null,
+        };
+    }
+
+    function getGraphPathAnchorOffset(container) {
+        const width = container && container.clientWidth ? container.clientWidth : 0;
+        return Math.max(GRAPH_PATH_ANCHOR_MIN_DISTANCE, width * GRAPH_PATH_ANCHOR_VIEWPORT_RATIO);
     }
 
     function resolveRenderableEdge(edge) {
@@ -2612,6 +2634,8 @@
     // Render graph view
     function renderGraph() {
         const container = document.getElementById('graph-view');
+        const pathAnchorIds = getActivePathAnchorNodeIds(filteredNodes);
+        const pathAnchorOffset = getGraphPathAnchorOffset(container);
         
         // Prepare vis-network data - use unique node IDs to handle prefix collisions
         // Remove duplicates by using a Map keyed by unique node ID
@@ -2620,6 +2644,8 @@
             const nodeId = getNodeId(node); // Use unique ID (prefix-lat-lon) instead of just prefix
             // Only add if we haven't seen this unique ID before
             if (!nodeMapById.has(nodeId)) {
+                const isPathFromAnchor = nodeId === pathAnchorIds.fromId && pathAnchorIds.fromId !== pathAnchorIds.toId;
+                const isPathToAnchor = nodeId === pathAnchorIds.toId && pathAnchorIds.fromId !== pathAnchorIds.toId;
                 // Use shorter label to reduce overlap, show full name in tooltip
                 // For very long names, use just the prefix or a very short version
                 let shortLabel = node.name;
@@ -2629,14 +2655,14 @@
                 } else if (node.name.length > 20) {
                     shortLabel = node.name.substring(0, 20) + '...';
                 }
-                nodeMapById.set(nodeId, {
+                const graphNode = {
                     id: nodeId,
-                    label: shortLabel,
+                    label: isPathFromAnchor ? `From: ${shortLabel}` : (isPathToAnchor ? `To: ${shortLabel}` : shortLabel),
                     title: `${escapeHtml(node.name)} (${escapeHtml(node.prefix)})`, // Full name in tooltip (rendered as HTML by vis-network)
                     prefix: node.prefix, // Store prefix for reference
                     color: {
                         background: getNodeFillColor(node),
-                        border: node.is_starred ? '#ffc107' : '#fff',
+                        border: isPathFromAnchor ? '#27FB6B' : (isPathToAnchor ? '#446DF6' : (node.is_starred ? '#ffc107' : '#fff')),
                         highlight: {
                             background: node.role === 'roomserver' ? '#10b981' : '#f59e0b',
                             border: '#d97706'
@@ -2646,10 +2672,22 @@
                             border: '#d97706'
                         }
                     },
-                    size: getNodeSize(node),
-                    borderWidth: getBorderWeight(getNodeSize(node), node.is_starred),
+                    size: (isPathFromAnchor || isPathToAnchor) ? Math.max(getNodeSize(node), 24) : getNodeSize(node),
+                    borderWidth: (isPathFromAnchor || isPathToAnchor) ? 5 : getBorderWeight(getNodeSize(node), node.is_starred),
                     font: { size: 12 }
-                });
+                };
+
+                // Pin the selected path endpoints to opposite sides of the graph
+                // canvas. This preserves the force-directed layout for the route
+                // interior while making the requested start/end nodes predictable.
+                if (isPathFromAnchor || isPathToAnchor) {
+                    graphNode.x = isPathFromAnchor ? -pathAnchorOffset : pathAnchorOffset;
+                    graphNode.y = 0;
+                    graphNode.fixed = { x: true, y: true };
+                    graphNode.physics = false;
+                }
+
+                nodeMapById.set(nodeId, graphNode);
             }
         });
         const nodes = Array.from(nodeMapById.values());
