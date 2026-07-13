@@ -262,6 +262,33 @@
                         <input type="text" class="form-control" id="filter-search" placeholder="Name, prefix, or path..." oninput="handleSearchInput();">
                     </div>
                 </div>
+                <div class="row mt-3">
+                    <div class="col-md-3">
+                        <label for="filter-path-from" class="form-label">From Node</label>
+                        <input type="text" class="form-control" id="filter-path-from" list="path-node-options" placeholder="Name, prefix, or public key" onkeydown="handlePathFilterKeydown(event);">
+                    </div>
+                    <div class="col-md-3">
+                        <label for="filter-path-to" class="form-label">To Node</label>
+                        <input type="text" class="form-control" id="filter-path-to" list="path-node-options" placeholder="Name, prefix, or public key" onkeydown="handlePathFilterKeydown(event);">
+                    </div>
+                    <div class="col-md-2">
+                        <label for="filter-path-max-hops" class="form-label">Max Hops</label>
+                        <input type="number" class="form-control" id="filter-path-max-hops" min="1" max="8" value="5" onchange="normalisePathMaxHops();">
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label">&nbsp;</label>
+                        <div class="d-flex align-items-center gap-2">
+                            <button type="button" class="btn btn-sm btn-primary" onclick="applyPathBetweenNodesFilter();">
+                                <i class="fas fa-route"></i> Apply Path
+                            </button>
+                            <button type="button" class="btn btn-sm btn-outline-secondary" onclick="clearPathBetweenNodesFilter();">
+                                Clear
+                            </button>
+                            <small id="path-filter-status" class="text-muted"></small>
+                        </div>
+                    </div>
+                    <datalist id="path-node-options"></datalist>
+                </div>
             </div>
         </div>
     </div>
@@ -648,8 +675,12 @@
     let isInitialMapLoad = true; // Track if this is the first time rendering the map with nodes
     let highlightedPath = null; // Currently highlighted path data
     let pathHighlightTimeout = null; // Debounce timer for path resolution
+    let activeBetweenNodePathFilter = null; // { fromQuery, toQuery, maxHops } for all-path filtering
 
     const PREFIX_HEX_CHARS = parseInt('{{ prefix_hex_chars|default(2) }}', 10);
+    const DEFAULT_PATH_FILTER_MAX_HOPS = 5;
+    const MAX_PATH_FILTER_HOPS = 8;
+    const MAX_PATH_FILTER_RESULTS = 100;
     // Graph prefix length from edges API (2, 4, or 6 hex chars); used for node prefix display and node fetch.
     let graphPrefixHexChars = PREFIX_HEX_CHARS;
     // Format prefix for display: add byte count when multi-byte (2 or 3 bytes)
@@ -702,6 +733,265 @@
 
     function edgeTouchesNode(edge, node) {
         return prefixesCompatible(edge.from_prefix, node.prefix) || prefixesCompatible(edge.to_prefix, node.prefix);
+    }
+
+    function setPathFilterStatus(message, level = 'muted') {
+        const status = document.getElementById('path-filter-status');
+        if (!status) return;
+        status.className = `text-${level}`;
+        status.textContent = message || '';
+    }
+
+    function normalisePathMaxHops() {
+        const input = document.getElementById('filter-path-max-hops');
+        if (!input) return DEFAULT_PATH_FILTER_MAX_HOPS;
+
+        const parsed = parseInt(input.value, 10);
+        const value = Math.min(MAX_PATH_FILTER_HOPS, Math.max(1, isNaN(parsed) ? DEFAULT_PATH_FILTER_MAX_HOPS : parsed));
+        input.value = value;
+        return value;
+    }
+
+    function handlePathFilterKeydown(event) {
+        if (event.key === 'Enter') {
+            event.preventDefault();
+            applyPathBetweenNodesFilter();
+        }
+    }
+
+    function rebuildFilteredNodeMaps() {
+        filteredNodeMap = {};
+        filteredNodeMapByKey = {};
+        filteredNodes.forEach(node => {
+            filteredNodeMap[node.prefix] = node;
+            if (node.public_key) filteredNodeMapByKey[node.public_key] = node;
+        });
+    }
+
+    function getPathFilterNodeLabel(node) {
+        const name = node.name || `Node ${node.prefix}`;
+        return `${name} [${node.prefix}]`;
+    }
+
+    function updatePathNodeOptions() {
+        const datalist = document.getElementById('path-node-options');
+        if (!datalist) return;
+
+        datalist.innerHTML = '';
+        const fragment = document.createDocumentFragment();
+        allNodes.forEach(node => {
+            const option = document.createElement('option');
+            option.value = getPathFilterNodeLabel(node);
+            option.label = node.public_key ? `${node.prefix} ${formatPublicKey(node.public_key)}` : node.prefix;
+            fragment.appendChild(option);
+        });
+        datalist.appendChild(fragment);
+    }
+
+    function normaliseNodeQuery(value) {
+        return (value || '').trim().toLowerCase();
+    }
+
+    function bracketPrefixFromQuery(query) {
+        const match = query.match(/\[([0-9a-f]{2,6})\]/i);
+        return match ? match[1].toLowerCase() : '';
+    }
+
+    function pathFilterMatchScore(node, rawQuery) {
+        const query = normaliseNodeQuery(rawQuery);
+        if (!query) return null;
+
+        const prefix = (node.prefix || '').toLowerCase();
+        const publicKey = (node.public_key || '').toLowerCase();
+        const name = (node.name || '').toLowerCase();
+        const bracketPrefix = bracketPrefixFromQuery(query);
+        const compactQuery = query.replace(/[^0-9a-f]/g, '');
+
+        if (bracketPrefix && prefix === bracketPrefix) return 0;
+        if (publicKey && publicKey === query) return 0;
+        if (prefix && prefix === query) return 1;
+        if (name && name === query) return 2;
+        if (publicKey && publicKey.startsWith(query)) return 3;
+        if (prefix && prefix.startsWith(query)) return 4;
+        if (compactQuery && prefix && prefix.startsWith(compactQuery)) return 5;
+        if (name && name.includes(query)) return 6;
+        return null;
+    }
+
+    function resolvePathFilterNode(rawQuery, availableNodes) {
+        const matches = [];
+        availableNodes.forEach(node => {
+            const score = pathFilterMatchScore(node, rawQuery);
+            if (score !== null) {
+                matches.push({ node, score });
+            }
+        });
+
+        matches.sort((a, b) => {
+            if (a.score !== b.score) return a.score - b.score;
+            return (a.node.name || '').localeCompare(b.node.name || '');
+        });
+        return matches.length ? matches[0].node : null;
+    }
+
+    function resolveRenderableEdge(edge) {
+        const fromNode = (edge.from_public_key && filteredNodeMapByKey[edge.from_public_key])
+            ? filteredNodeMapByKey[edge.from_public_key]
+            : (filteredNodeMap[edge.from_prefix] || findNodeByEdgePrefix(edge.from_prefix));
+        const toNode = (edge.to_public_key && filteredNodeMapByKey[edge.to_public_key])
+            ? filteredNodeMapByKey[edge.to_public_key]
+            : (filteredNodeMap[edge.to_prefix] || findNodeByEdgePrefix(edge.to_prefix));
+        return { fromNode, toNode };
+    }
+
+    function enumerateAllSimplePathsBetweenNodes(fromNode, toNode, maxHops) {
+        const fromId = getNodeId(fromNode);
+        const toId = getNodeId(toNode);
+        const adjacency = new Map();
+        const selectedNodes = new Set();
+        const selectedEdges = new Set();
+        const paths = [];
+        let capped = false;
+
+        filteredEdges.forEach(edge => {
+            const { fromNode: edgeFrom, toNode: edgeTo } = resolveRenderableEdge(edge);
+            if (!edgeFrom || !edgeTo) return;
+
+            const a = getNodeId(edgeFrom);
+            const b = getNodeId(edgeTo);
+            if (!adjacency.has(a)) adjacency.set(a, new Map());
+            if (!adjacency.has(b)) adjacency.set(b, new Map());
+
+            const addSegment = (fromId, toId) => {
+                const neighbours = adjacency.get(fromId);
+                if (!neighbours.has(toId)) {
+                    neighbours.set(toId, { nodeId: toId, edges: [], bestObservation: 0 });
+                }
+                const segment = neighbours.get(toId);
+                segment.edges.push(edge);
+                segment.bestObservation = Math.max(segment.bestObservation, edge.observation_count || 0);
+            };
+
+            addSegment(a, b);
+            addSegment(b, a);
+        });
+
+        adjacency.forEach((neighbourMap, nodeId) => {
+            adjacency.set(
+                nodeId,
+                Array.from(neighbourMap.values()).sort((a, b) => b.bestObservation - a.bestObservation)
+            );
+        });
+
+        function dfs(currentId, nodePath, edgePath, visited) {
+            if (paths.length >= MAX_PATH_FILTER_RESULTS) {
+                capped = true;
+                return;
+            }
+            if (currentId === toId) {
+                paths.push({ nodes: [...nodePath], edges: [...edgePath] });
+                nodePath.forEach(id => selectedNodes.add(id));
+                return;
+            }
+            if (edgePath.length >= maxHops) return;
+
+            const neighbours = adjacency.get(currentId) || [];
+            for (const next of neighbours) {
+                if (visited.has(next.nodeId)) continue;
+
+                visited.add(next.nodeId);
+                nodePath.push(next.nodeId);
+                edgePath.push(next);
+                dfs(next.nodeId, nodePath, edgePath, visited);
+                edgePath.pop();
+                nodePath.pop();
+                visited.delete(next.nodeId);
+
+                if (paths.length >= MAX_PATH_FILTER_RESULTS) {
+                    capped = true;
+                    return;
+                }
+            }
+        }
+
+        dfs(fromId, [fromId], [], new Set([fromId]));
+        paths.forEach(path => {
+            path.edges.forEach(segment => {
+                segment.edges.forEach(edge => selectedEdges.add(edge));
+            });
+        });
+        return { paths, selectedNodes, selectedEdges, capped };
+    }
+
+    function applyPathBetweenNodesFilter() {
+        const fromInput = document.getElementById('filter-path-from');
+        const toInput = document.getElementById('filter-path-to');
+        const fromQuery = fromInput ? fromInput.value.trim() : '';
+        const toQuery = toInput ? toInput.value.trim() : '';
+        const maxHops = normalisePathMaxHops();
+
+        if (!fromQuery || !toQuery) {
+            activeBetweenNodePathFilter = null;
+            setPathFilterStatus('Select two nodes', 'warning');
+            applyFilters();
+            return;
+        }
+
+        clearHighlights();
+        activeBetweenNodePathFilter = { fromQuery, toQuery, maxHops };
+        applyFilters();
+        saveFilters();
+    }
+
+    function clearPathBetweenNodesFilter() {
+        activeBetweenNodePathFilter = null;
+
+        const fromInput = document.getElementById('filter-path-from');
+        const toInput = document.getElementById('filter-path-to');
+        if (fromInput) fromInput.value = '';
+        if (toInput) toInput.value = '';
+
+        setPathFilterStatus('');
+        applyFilters();
+        saveFilters();
+    }
+
+    function applyActiveBetweenNodePathFilter() {
+        if (!activeBetweenNodePathFilter) {
+            setPathFilterStatus('');
+            return;
+        }
+
+        const fromNode = resolvePathFilterNode(activeBetweenNodePathFilter.fromQuery, filteredNodes);
+        const toNode = resolvePathFilterNode(activeBetweenNodePathFilter.toQuery, filteredNodes);
+        if (!fromNode || !toNode) {
+            setPathFilterStatus('Node not found in current filters', 'warning');
+            return;
+        }
+
+        const fromId = getNodeId(fromNode);
+        const toId = getNodeId(toNode);
+        if (fromId === toId) {
+            filteredNodes = filteredNodes.filter(node => getNodeId(node) === fromId);
+            filteredEdges = [];
+            setPathFilterStatus('Showing selected node only', 'info');
+            return;
+        }
+
+        const result = enumerateAllSimplePathsBetweenNodes(fromNode, toNode, activeBetweenNodePathFilter.maxHops);
+        if (result.paths.length === 0) {
+            setPathFilterStatus('No path found in current filters', 'warning');
+            return;
+        }
+
+        filteredNodes = filteredNodes.filter(node => result.selectedNodes.has(getNodeId(node)));
+        filteredEdges = filteredEdges.filter(edge => result.selectedEdges.has(edge));
+
+        const pathText = result.capped ? `${MAX_PATH_FILTER_RESULTS}+ paths` : `${result.paths.length} path${result.paths.length === 1 ? '' : 's'}`;
+        setPathFilterStatus(
+            `${pathText}, ${filteredNodes.length} nodes, ${filteredEdges.length} edges`,
+            result.capped ? 'warning' : 'success'
+        );
     }
 
     // Great-circle distance fallback for edges without a stored distance
@@ -1510,6 +1800,7 @@
                     nodeMapByKey[node.public_key] = node; // Map by public key for accurate lookups
                 }
             });
+            updatePathNodeOptions();
             
             // Build edge map
             edgeMap = {};
@@ -1541,7 +1832,8 @@
                 nodeDays: document.getElementById('filter-node-days').value,
                 starredOnly: document.getElementById('filter-starred').checked,
                 evidence: document.getElementById('filter-evidence').value,
-                colorMode: edgeColorMode
+                colorMode: edgeColorMode,
+                pathMaxHops: normalisePathMaxHops()
                 // Note: searchTerm is NOT saved - it should not persist across reloads
             };
             localStorage.setItem('meshGraphFilters', JSON.stringify(filters));
@@ -1578,6 +1870,13 @@
                 }
                 if (filters.colorMode === 'age' || filters.colorMode === 'heat') {
                     edgeColorMode = filters.colorMode;
+                }
+                if (filters.pathMaxHops !== undefined && filters.pathMaxHops !== null) {
+                    const maxHopsInput = document.getElementById('filter-path-max-hops');
+                    if (maxHopsInput) {
+                        maxHopsInput.value = filters.pathMaxHops;
+                        normalisePathMaxHops();
+                    }
                 }
                 // Note: searchTerm is NOT loaded - it should reset on page reload
             }
@@ -1638,12 +1937,13 @@
         });
         
         // Build filtered node maps for O(1) edge endpoint resolution (only draw edges when both endpoints are in filtered set)
-        filteredNodeMap = {};
-        filteredNodeMapByKey = {};
-        filteredNodes.forEach(node => {
-            filteredNodeMap[node.prefix] = node;
-            if (node.public_key) filteredNodeMapByKey[node.public_key] = node;
-        });
+        rebuildFilteredNodeMaps();
+
+        // The between-nodes path filter narrows the already-filtered graph. This
+        // keeps min observations, timeframe, starred-only, and evidence mode as
+        // the source of truth before enumerating all simple paths.
+        applyActiveBetweenNodePathFilter();
+        rebuildFilteredNodeMaps();
 
         // Per-node degree and observation totals for sizing and heat coloring
         computeNodeStats();
