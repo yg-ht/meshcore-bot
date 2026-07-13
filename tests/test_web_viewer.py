@@ -246,6 +246,20 @@ class TestPageRoutes:
     def test_mesh(self, client):
         resp = client.get("/mesh")
         assert resp.status_code == 200
+        html = resp.data.decode()
+        assert 'id="filter-path-from"' in html
+        assert 'id="filter-path-to"' in html
+        assert 'id="filter-path-max-hops"' in html
+        assert 'id="filter-path-max-results"' in html
+        assert 'value="5"' in html
+        assert 'value="100"' in html
+        assert 'id="filter-path-max-hops" min="1" value="5"' in html
+        assert 'id="filter-path-max-results" min="1" value="100"' in html
+        assert 'DEFAULT_PATH_FILTER_MAX_RESULTS = 100' in html
+        assert 'function enumerateAllSimplePathsBetweenNodes' in html
+        assert 'function applyPathBetweenNodesFilter' in html
+        assert 'function clearPathBetweenNodesFilter' in html
+        assert 'function applyActiveBetweenNodePathFilter' in html
 
 
 # ===========================================================================
