@@ -19,6 +19,12 @@ The main sections include:
 | `[Keywords]` | Keyword → response pairs |
 | `[Weather]` | Units and settings shared by `wx` / `gwx` and Weather Service |
 | `[Logging]` | Log file path and level |
+| `[Web_Viewer]` | Web dashboard (host, port, password, auto_start) |
+| `[Data_Retention]` | Database table retention periods — see [Data retention](data-retention.md) |
+| `[Rate_Limits]` | Per-channel minimum seconds between bot messages |
+| `[Webhook]` | Inbound HTTP POST relay to channels or DMs |
+| `[Version_Command]` | `version` / `ver` command |
+| `[Schedule_Command]` | `schedule` command visibility |
 
 ### Connection: type and precedence
 
@@ -150,6 +156,35 @@ Under `[Bot]`:
 - **`command_prefix`** – Optional global prefix(es) for commands. A single value (`!`, `abc`), comma-separated list (`!, ~, .`), or concatenated decorative characters (`!~.`) where the **first** entry is shown in help/docs. Leave empty for bare commands (legacy leading `!` is still accepted).
 - **`require_command_prefix`** – When `true` (default), messages must start with a configured prefix. When `false`, configured prefix(es) are stripped when present but bare commands also work. Ignored when `command_prefix` is empty.
 
+### Per-command aliases (v0.9)
+
+The global **`[Aliases]`** section is **deprecated**. Define aliases in each command’s own section:
+
+```ini
+[Wx_Command]
+enabled = true
+aliases = weather, w
+```
+
+Remove any legacy `[Aliases]` block when upgrading. See [Upgrade guide](upgrade.md#upgrading-from-v08--v09).
+
+### Rate limiting
+
+**`[Rate_Limits]`** sets per-channel minimum seconds between bot messages:
+
+```ini
+[Rate_Limits]
+channel.BotCmds_seconds = 15
+```
+
+Channels without an entry are unrestricted. Global and per-user rate limits remain under `[Bot]`.
+
+### Inbound webhook
+
+**`[Webhook]`** runs an HTTP server that accepts POST requests and relays JSON payloads to MeshCore channels or DMs. See `config.ini.example` for `enabled`, `host`, `port`, `secret_token`, `allowed_channels`, and `rate_limit_per_minute`. Use bearer token or `X-Webhook-Token` when `secret_token` is set.
+
+Bind to `127.0.0.1` unless your firewall restricts access. Default port **8765** (must not conflict with the web viewer on **8080**).
+
 Full reference: see `config.ini.example` in the repository for every section and option, with inline comments.
 
 ### Config templates
@@ -168,6 +203,8 @@ Database tables (packet stream, stats, repeater data, mesh graph) are pruned aut
 The Path command has many options (presets, proximity, graph validation, etc.). All are documented in:
 
 **[Path Command](path-command-config.md)** – Presets, geographic and graph settings, and tuning.
+
+Key option: **`geographic_scoring_enabled`** (default `true`) in `[Path_Command]` — when `false`, geographic proximity guessing is disabled for path decode.
 
 ## Service plugin configuration
 
